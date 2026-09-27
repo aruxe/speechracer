@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpeakRacer — TypeRacer, but you talk</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#161923; --line:#262b3a; --text:#e8eaf0; --muted:#8a90a3;
+    --accent:#6ee7a0; --accent2:#f2b84b; --err:#f26b6b;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .wrap{max-width:720px; width:100%;}
+  h1{font-size:26px; margin:0 0 4px;}
+  .sub{color:var(--muted); margin:0 0 20px; font-size:14px;}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:20px; margin-bottom:16px;}
+  label{font-size:13px; color:var(--muted); display:block; margin-bottom:6px;}
+  input[type=password], input[type=text]{
+    width:100%; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
+    background:#0c0e14; color:var(--text); font-size:14px;
+  }
+  .row{display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;}
+  .row > div{flex:1; min-width:200px;}
+  button{
+    background:var(--accent); color:#0b1a12; border:none; border-radius:8px;
+    padding:11px 18px; font-weight:600; font-size:14px; cursor:pointer;
+  }
+  button:disabled{background:#3a3f4d; color:var(--muted); cursor:not-allowed;}
+  button.secondary{background:transparent; border:1px solid var(--line); color:var(--text);}
+  .track{font-size:19px; line-height:1.7; letter-spacing:0.2px;}
+  .word{color:var(--muted); transition:color .15s;}
+  .word.done{color:var(--accent);}
+  .word.next{color:var(--text); text-decoration:underline; text-decoration-color:var(--accent2);}
+  .stats{display:flex; gap:24px; margin-top:14px; font-size:14px;}
+  .stats b{font-size:22px; display:block; color:var(--accent);}
+  .status{font-size:13px; color:var(--muted); margin-top:10px; min-height:18px;}
+  .status.err{color:var(--err);}
+  .heard{font-size:13px; color:var(--muted); margin-top:10px; min-height:20px; font-style:italic;}
+  .result{font-size:15px;}
+  .result b{color:var(--accent);}
+  .hidden{display:none;}
+  a{color:var(--accent2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎙️ SpeakRacer</h1>
+  <p class="sub">TypeRacer, but you read it out loud. Powered by Deepgram live speech-to-text.</p>
+
+  <div class="card" id="setupCard">
+    <div class="row">
+      <div>
+        <label>Deepgram API key (yours — used only in your browser)</label>
+        <input type="password" id="apiKey" placeholder="dg_...">
+      </div>
+      <button id="startBtn">Start Race</button>
+    </div>
+    <p class="status" id="setupStatus">Get a free key at <a href="https://console.deepgram.com/signup" target="_blank">console.deepgram.com</a>. Key is never sent anywhere except Deepgram's API.</p>
+  </div>
+
+  <div class="card hidden" id="raceCard">
+    <div class="track" id="track"></div>
+    <div class="heard" id="heard"></div>
+    <div class="stats">
+      <div>Time<b id="timeStat">0.0s</b></div>
+      <div>WPM<b id="wpmStat">—</b></div>
+      <div>Progress<b id="progStat">0%</b></div>
+    </div>
+    <div class="status" id="raceStatus">Connecting to mic + Deepgram…</div>
+  </div>
+
+  <div class="card hidden" id="resultCard">
+    <p class="result">Finished in <b id="finalTime"></b> at <b id="finalWpm"></b> WPM.</p>
+    <button id="againBtn">Race Again</button>
+    <button class="secondary" id="newTextBtn">New Excerpt</button>
+  </div>
+</div>
+
+<script>
+const EXCERPTS = [
+  "The quick fox does not wait for perfect conditions before it starts to run through the forest.",
+  "Speed comes from practice, not from talent alone, and every fast reader was once a slow one.",
+  "A good race rewards clarity over haste, so speak plainly and let the words land where they should.",
+  "Clouds drift over the valley while the river below keeps moving, patient and unbothered by the wind.",
+  "Most people quit right before the breakthrough, so the real skill is simply staying in the race a little longer."
+];
+
+let ws, audioCtx, processor, micStream;
+let targetWords = [], finalChunks = [], pointer = 0;
+let startTime = null, timerHandle = null, finished = false;
+
+const $ = id => document.getElementById(id);
+const norm = w => w.toLowerCase().replace(/[^a-z0-9']/g, "");
+
+function pickExcerpt(){
+  const text = EXCERPTS[Math.floor(Math.random()*EXCERPTS.length)];
+  targetWords = text.split(" ");
+  pointer = 0; finalChunks = []; finished = false;
+  renderTrack();
+}
+
+function renderTrack(){
+  $("track").innerHTML = targetWords.map((w,i)=>{
+    const cls = i < pointer ? "done" : (i === pointer ? "next" : "");
+    return `<span class="word ${cls}">${w}</span>`;
+  }).join(" ");
+  $("progStat").textContent = Math.round((pointer/targetWords.length)*100)+"%";
+}
+
+function updateTimer(){
+  if(!startTime) return;
+  const secs = (Date.now()-startTime)/1000;
+  $("timeStat").textContent = secs.toFixed(1)+"s";
+  const wpm = Math.round((pointer/5)/(secs/60)) || 0;
+  $("wpmStat").textContent = pointer>0 ? wpm : "—";
+}
+
+function matchTranscript(){
+  const spoken = finalChunks.join(" ").split(/\s+/).filter(Boolean).map(norm);
+  let j = pointer;
+  for(const sw of spoken.slice(matchTranscript.consumed||0)){
+    if(j < targetWords.length && sw === norm(targetWords[j])) j++;
+  }
+  matchTranscript.consumed = spoken.length;
+  pointer = j;
+  renderTrack();
+  $("heard").textContent = "Heard: " + finalChunks.slice(-2).join(" ");
+  if(pointer >= targetWords.length && !finished) finishRace();
+}
+
+async function startRace(){
+  const key = $("apiKey").value.trim();
+  if(!key){ $("setupStatus").textContent = "Enter your Deepgram API key first."; $("setupStatus").className="status err"; return; }
+
+  $("setupCard").classList.add("hidden");
+  $("raceCard").classList.remove("hidden");
+  $("resultCard").classList.add("hidden");
+  pickExcerpt();
+
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch(e){
+    $("raceStatus").textContent = "Mic access denied: "+e.message;
+    $("raceStatus").className = "status err";
+    return;
+  }
+
+  audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+  const source = audioCtx.createMediaStreamSource(micStream);
+  processor = audioCtx.createScriptProcessor(4096, 1, 1);
+  const targetRate = 16000;
+
+  const url = "wss://api.deepgram.com/v1/listen?model=nova-3&language=en&punctuate=true&smart_format=true&interim_results=true&encoding=linear16&sample_rate="+audioCtx.sampleRate;
+  ws = new WebSocket(url, ["token", key]);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => {
+    $("raceStatus").textContent = "Listening — start reading!";
+    startTime = Date.now();
+    timerHandle = setInterval(updateTimer, 100);
+    source.connect(processor);
+    processor.connect(audioCtx.destination);
+  };
+
+  processor.onaudioprocess = e => {
+    if(ws.readyState !== 1) return;
+    const input = e.inputBuffer.getChannelData(0);
+    const int16 = new Int16Array(input.length);
+    for(let i=0;i<input.length;i++){
+      const s = Math.max(-1, Math.min(1, input[i]));
+      int16[i] = s < 0 ? s*0x8000 : s*0x7FFF;
+    }
+    ws.send(int16.buffer);
+  };
+
+  ws.onmessage = ev => {
+    try{
+      const data = JSON.parse(ev.data);
+      if(data.type === "Results"){
+        const alt = data.channel && data.channel.alternatives && data.channel.alternatives[0];
+        if(alt && data.is_final && alt.transcript && alt.transcript.trim()){
+          finalChunks.push(alt.transcript.trim());
+          matchTranscript();
+        }
+      }
+    }catch(_){}
+  };
+
+  ws.onerror = () => {
+    $("raceStatus").textContent = "Connection error — check your API key.";
+    $("raceStatus").className = "status err";
+  };
+
+  ws.onclose = () => {
+    if(!finished) $("raceStatus").textContent = "Connection closed.";
+  };
+}
+
+function stopAudio(){
+  if(processor){ processor.disconnect(); processor.onaudioprocess = null; }
+  if(audioCtx) audioCtx.close();
+  if(micStream) micStream.getTracks().forEach(t=>t.stop());
+  if(ws && ws.readyState === 1){
+    try{ ws.send(JSON.stringify({type:"CloseStream"})); }catch(_){}
+    ws.close();
+  }
+  if(timerHandle) clearInterval(timerHandle);
+}
+
+function finishRace(){
+  finished = true;
+  updateTimer();
+  stopAudio();
+  const secs = (Date.now()-startTime)/1000;
+  const wpm = Math.round((targetWords.length/5)/(secs/60));
+  $("finalTime").textContent = secs.toFixed(1)+"s";
+  $("finalWpm").textContent = wpm;
+  $("raceCard").classList.add("hidden");
+  $("resultCard").classList.remove("hidden");
+}
+
+$("startBtn").onclick = startRace;
+$("againBtn").onclick = () => { $("resultCard").classList.add("hidden"); startRace(); };
+$("newTextBtn").onclick = () => { $("resultCard").classList.add("hidden"); startRace(); };
+</script>
+</body>
+</html>
