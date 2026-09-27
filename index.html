@@ -155,7 +155,7 @@ async function startRace(){
   processor = audioCtx.createScriptProcessor(4096, 1, 1);
   const targetRate = 16000;
 
-  const url = "wss://api.deepgram.com/v1/listen?model=nova-3&language=en&punctuate=true&smart_format=true&interim_results=true&encoding=linear16&sample_rate="+audioCtx.sampleRate;
+  const url = "wss://api.deepgram.com/v1/listen?model=nova-3&language=en&interim_results=true&encoding=linear16&sample_rate="+audioCtx.sampleRate;
   ws = new WebSocket(url, ["token", key]);
   ws.binaryType = "arraybuffer";
 
